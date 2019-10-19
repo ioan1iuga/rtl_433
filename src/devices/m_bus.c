@@ -131,14 +131,121 @@ typedef struct {
     uint16_t    CRC;      // Optional (Only for Format A)
 } m_bus_block1_t;
 
+// Data structure for block 2
+typedef struct {
+    uint8_t     CI;         //
+    /* Long header */
+    uint8_t     Id_nr[4];   // Identification number
+    uint8_t     Manu_id[2]; // Manufacturer identification
+    uint8_t     Version;
+    uint8_t     Device_type;
+
+    /* Short header */
+    uint8_t     ACC;        //
+    uint8_t     Status;     //
+    uint8_t     CW0;        //
+    uint8_t     CW1;        //
+} m_bus_block2_t;
+
+
 typedef struct {
     unsigned    length;
     uint8_t     data[512];
 } m_bus_data_t;
 
-static int m_bus_decode_format_a(r_device *decoder, const m_bus_data_t *in, m_bus_data_t *out, m_bus_block1_t *block1)
+enum {
+    NONE,
+    SHORT,
+    LONG,
+    RESERVED,
+    UNDEF,
+} mbus_header_types;
+
+uint8_t m_bus_header_types[0x100] = {
+    /*0x00*/ RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED,
+    /*0x08*/ RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED,
+    /*0x10*/ RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED,
+    /*0x18*/ RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED,
+    /*0x20*/ RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED,
+    /*0x28*/ RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED,
+    /*0x30*/ RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED,
+    /*0x38*/ RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED,
+    /*0x40*/ RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED,
+    /*0x48*/ RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED,
+    /*0x50*/ NONE, NONE, NONE, LONG, RESERVED, RESERVED, RESERVED, RESERVED,
+    /*0x58*/ RESERVED, RESERVED, SHORT, LONG, UNDEF, RESERVED, RESERVED, RESERVED,
+    /*0x60*/ LONG, SHORT, RESERVED, RESERVED, LONG, SHORT, RESERVED, RESERVED,
+    /*0x68*/ RESERVED,  NONE, SHORT, LONG, LONG, LONG, SHORT, LONG,
+    /*0x70*/ NONE, NONE, LONG, LONG, SHORT, LONG, RESERVED, RESERVED,
+    /*0x78*/ NONE, NONE, SHORT, SHORT, LONG, SHORT, LONG, SHORT,
+    /*0x80*/ LONG, UNDEF, RESERVED, UNDEF, LONG, LONG, RESERVED, RESERVED,
+    /*0x88*/ RESERVED, RESERVED, SHORT, LONG, UNDEF, UNDEF, UNDEF, UNDEF,
+    /*0x90*/ RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED,
+    /*0x98*/ RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED,
+    /*0xA0*/ UNDEF, UNDEF, UNDEF, UNDEF, UNDEF, UNDEF, UNDEF, UNDEF,
+    /*0xA8*/ UNDEF, UNDEF, UNDEF, UNDEF, UNDEF, UNDEF, UNDEF, UNDEF,
+    /*0xB0*/ UNDEF, UNDEF, UNDEF, UNDEF, UNDEF, UNDEF, UNDEF, UNDEF,
+    /*0xB8*/ UNDEF, UNDEF, UNDEF, UNDEF, UNDEF, UNDEF, UNDEF, UNDEF,
+    /*0xC0*/ RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED,
+    /*0xC8*/ RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED,
+    /*0xD0*/ RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED,
+    /*0xD8*/ RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED,
+    /*0xE0*/ RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED,
+    /*0xE8*/ RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED,
+    /*0xF0*/ RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED,
+    /*0xF8*/ RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED, RESERVED,
+};
+
+
+static void m_bus_parse_short_header(const m_bus_data_t *in, m_bus_block2_t *block2)
+{
+    block2->ACC = in->data[13];
+    block2->Status = in->data[14];
+    block2->CW0 = in->data[15];
+    block2->CW1 = in->data[16];
+}
+
+static void m_bus_parse_long_header(const m_bus_data_t *in, m_bus_block2_t *block2)
+{
+
+    // Incomplete
+
+    block2->ACC = in->data[13];
+    block2->Status = in->data[14];
+    block2->CW0 = in->data[15];
+    block2->CW1 = in->data[16];
+}
+
+static int m_bus_parse_header(const m_bus_data_t *in, m_bus_block2_t *block2)
+{
+    int ret=0;
+    block2->CI = in->data[12];
+fprintf(stderr, "M-Bus: CI: %u\n",block2->CI);
+    int header_type = m_bus_header_types[block2->CI];
+    switch (header_type) {
+        case SHORT:
+fprintf(stderr, "M-Bus: short: %u\n",header_type);
+            m_bus_parse_short_header(in, block2);
+            break;
+        case LONG:
+fprintf(stderr, "M-Bus: long: %u\n",header_type);
+            m_bus_parse_long_header(in, block2);
+            break;
+        case NONE:
+        case RESERVED:
+        case UNDEF:
+        default:
+fprintf(stderr, "M-Bus: none: %u\n",header_type);
+            break;
+    }
+    return 0;
+}
+
+
+static int m_bus_decode_format_a(r_device *decoder, const m_bus_data_t *in, m_bus_data_t *out, m_bus_block1_t *block1, m_bus_block2_t *block2)
 {
     static const uint16_t BLOCK1A_SIZE = 12;     // Size of Block 1, format A
+    static const uint16_t BLOCK2A_SIZE = 12;     // Size of Block 2, format A
 
     // Get Block 1
     block1->L         = in->data[0];
@@ -160,6 +267,10 @@ static int m_bus_decode_format_a(r_device *decoder, const m_bus_data_t *in, m_bu
         if (decoder->verbose) { fprintf(stderr, "M-Bus: Package too short for Length: %u\n", block1->L); }
         return 0;
     }
+fprintf(stderr, "m_bus_parse_header: CI: %u\n",block2->CI);
+    m_bus_parse_header(in, block2);
+    // Get Block 2
+
 
     // Get all remaining data blocks and concatenate into data array (removing CRC bytes)
     for (unsigned n=0; n < num_data_blocks; ++n) {
@@ -176,7 +287,7 @@ static int m_bus_decode_format_a(r_device *decoder, const m_bus_data_t *in, m_bu
     return 1;
 }
 
-static int m_bus_decode_format_b(r_device *decoder, const m_bus_data_t *in, m_bus_data_t *out, m_bus_block1_t *block1)
+static int m_bus_decode_format_b(r_device *decoder, const m_bus_data_t *in, m_bus_data_t *out, m_bus_block1_t *block1, m_bus_block2_t *block2)
 {
     static const uint16_t BLOCK1B_SIZE  = 10;   // Size of Block 1, format B
     static const uint16_t BLOCK2B_SIZE  = 118;  // Maximum size of Block 2, format B
@@ -198,6 +309,9 @@ static int m_bus_decode_format_b(r_device *decoder, const m_bus_data_t *in, m_bu
         if (decoder->verbose) { fprintf(stderr, "M-Bus: Package too short for Length: %u\n", block1->L); }
         return 0;
     }
+    
+fprintf(stderr, "m_bus_parse_header B: CI: %u\n",block2->CI);
+    m_bus_parse_header(in, block2);
 
     // Validate CRC
     if (!m_bus_crc_valid(decoder, in->data, MIN(block1->L-1, (BLOCK1B_SIZE+BLOCK2B_SIZE)-2))) return 0;
@@ -219,7 +333,7 @@ static int m_bus_decode_format_b(r_device *decoder, const m_bus_data_t *in, m_bu
     return 1;
 }
 
-static void m_bus_output_data(r_device *decoder, const m_bus_data_t *out, const m_bus_block1_t *block1)
+static void m_bus_output_data(r_device *decoder, const m_bus_data_t *out, const m_bus_block1_t *block1, const m_bus_block2_t *block2, const char *mode)
 {
     data_t  *data;
     char    str_buf[1024];
@@ -233,6 +347,7 @@ static void m_bus_output_data(r_device *decoder, const m_bus_data_t *out, const 
     // Output data
     data = data_make(
         "model",    "",             DATA_STRING,    _X("Wireless-MBus","Wireless M-Bus"),
+        "mode",     "",             DATA_STRING,    mode,
         "M",        "Manufacturer", DATA_STRING,    block1->M_str,
         "id",       "ID",           DATA_INT,       block1->A_ID,
         "version",  "Version",      DATA_INT,       block1->A_Version,
@@ -244,6 +359,17 @@ static void m_bus_output_data(r_device *decoder, const m_bus_data_t *out, const 
         "data",     "Data",         DATA_STRING,    str_buf,
         "mic",      "Integrity",    DATA_STRING,    "CRC",
         NULL);
+
+    if (1) {
+        data_append(data, 
+        "CI",    "CI",      DATA_FORMAT, "0x%02X",   DATA_INT, block2->CI,
+        "ACC",    "ACC",      DATA_FORMAT, "0x%02X",   DATA_INT, block2->ACC,
+        "status",    "status",      DATA_FORMAT, "0x%02X",   DATA_INT, block2->Status,
+        "CW0",    "CW0",      DATA_FORMAT, "0x%02X",   DATA_INT, block2->CW0,
+        "CW1",    "CW1",      DATA_FORMAT, "0x%02X",   DATA_INT, block2->CW1,
+        NULL);
+    }
+
     decoder_output_data(decoder, data);
 }
 
@@ -256,6 +382,9 @@ static int m_bus_mode_c_t_callback(r_device *decoder, bitbuffer_t *bitbuffer) {
     m_bus_data_t    data_in     = {0};  // Data from Physical layer decoded to bytes
     m_bus_data_t    data_out    = {0};  // Data from Data Link layer
     m_bus_block1_t  block1      = {0};  // Block1 fields from Data Link layer
+    m_bus_block2_t  block2      = {0};  // Block2 fields from Data Link layer
+
+    char *mode = "";
 
     // Validate package length
     if (bitbuffer->bits_per_row[0] < (32+13*8) || bitbuffer->bits_per_row[0] > (64+256*8)) {  // Min/Max (Preamble + payload)
@@ -276,6 +405,7 @@ static int m_bus_mode_c_t_callback(r_device *decoder, bitbuffer_t *bitbuffer) {
     bit_offset += 8;
     // Mode C
     if (next_byte == 0x54) {
+        mode = "C";
         next_byte = bitrow_get_byte(bitbuffer->bb[0], bit_offset);
         bit_offset += 8;
         // Format A
@@ -285,7 +415,7 @@ static int m_bus_mode_c_t_callback(r_device *decoder, bitbuffer_t *bitbuffer) {
             data_in.length = (bitbuffer->bits_per_row[0]-bit_offset)/8;
             bitbuffer_extract_bytes(bitbuffer, 0, bit_offset, data_in.data, data_in.length*8);
             // Decode
-            if(!m_bus_decode_format_a(decoder, &data_in, &data_out, &block1))    return 0;
+            if(!m_bus_decode_format_a(decoder, &data_in, &data_out, &block1, &block2))    return 0;
         } // Format A
         // Format B
         else if (next_byte == 0x3D) {
@@ -294,7 +424,7 @@ static int m_bus_mode_c_t_callback(r_device *decoder, bitbuffer_t *bitbuffer) {
             data_in.length = (bitbuffer->bits_per_row[0]-bit_offset)/8;
             bitbuffer_extract_bytes(bitbuffer, 0, bit_offset, data_in.data, data_in.length*8);
             // Decode
-            if(!m_bus_decode_format_b(decoder, &data_in, &data_out, &block1))    return 0;
+            if(!m_bus_decode_format_b(decoder, &data_in, &data_out, &block1, &block2))    return 0;
         }   // Format B
         // Unknown Format
         else {
@@ -307,6 +437,7 @@ static int m_bus_mode_c_t_callback(r_device *decoder, bitbuffer_t *bitbuffer) {
     }   // Mode C
     // Mode T
     else {
+        mode = "T";
         bit_offset -= 8; // Rewind offset to start of telegram
         if (decoder->verbose) { fprintf(stderr, "M-Bus: Mode T\n"); }
         if (decoder->verbose) { fprintf(stderr, "Experimental - Not tested\n"); }
@@ -318,10 +449,11 @@ static int m_bus_mode_c_t_callback(r_device *decoder, bitbuffer_t *bitbuffer) {
             return 0;
         }
         // Decode
-        if(!m_bus_decode_format_a(decoder, &data_in, &data_out, &block1))    return 0;
+        if(!m_bus_decode_format_a(decoder, &data_in, &data_out, &block1, &block2)) return 0;
+        
     }   // Mode T
 
-    m_bus_output_data(decoder, &data_in, &block1);
+    m_bus_output_data(decoder, &data_in, &block1, &block2, mode);
     return 1;
 }
 
@@ -332,6 +464,7 @@ static int m_bus_mode_r_callback(r_device *decoder, bitbuffer_t *bitbuffer) {
     m_bus_data_t    data_in     = {0};  // Data from Physical layer decoded to bytes
     m_bus_data_t    data_out    = {0};  // Data from Data Link layer
     m_bus_block1_t  block1      = {0};  // Block1 fields from Data Link layer
+    m_bus_block2_t  block2      = {0};  // Block2 fields from Data Link layer
 
     // Validate package length
     if (bitbuffer->bits_per_row[0] < (32+13*8) || bitbuffer->bits_per_row[0] > (64+256*8)) {  // Min/Max (Preamble + payload)
@@ -351,9 +484,9 @@ static int m_bus_mode_r_callback(r_device *decoder, bitbuffer_t *bitbuffer) {
     data_in.length = (bitbuffer->bits_per_row[0]-bit_offset)/8;
     bitbuffer_extract_bytes(bitbuffer, 0, bit_offset, data_in.data, data_in.length*8);
     // Decode
-    if(!m_bus_decode_format_a(decoder, &data_in, &data_out, &block1))    return 0;
+    if(!m_bus_decode_format_a(decoder, &data_in, &data_out, &block1, &block2))    return 0;
 
-    m_bus_output_data(decoder, &data_out, &block1);
+    m_bus_output_data(decoder, &data_out, &block1, &block2, "R");
     return 1;
 }
 
@@ -366,6 +499,7 @@ static int m_bus_mode_f_callback(r_device *decoder, bitbuffer_t *bitbuffer) {
     m_bus_data_t    data_in     = {0};  // Data from Physical layer decoded to bytes
     m_bus_data_t    data_out    = {0};  // Data from Data Link layer
     m_bus_block1_t  block1      = {0};  // Block1 fields from Data Link layer
+    m_bus_block2_t  block2      = {0};  // Block2 fields from Data Link layer
 
     // Validate package length
     if (bitbuffer->bits_per_row[0] < (32+13*8) || bitbuffer->bits_per_row[0] > (64+256*8)) {  // Min/Max (Preamble + payload)
@@ -402,7 +536,7 @@ static int m_bus_mode_f_callback(r_device *decoder, bitbuffer_t *bitbuffer) {
         return 0;
     }
 
-    m_bus_output_data(decoder, &data_out, &block1);
+    m_bus_output_data(decoder, &data_out, &block1, &block2, "F");
     return 1;
 }
 
