@@ -178,11 +178,11 @@ int16_t atan2_int16(int16_t y, int16_t x)
 void baseband_demod_FM(uint8_t const *x_buf, int16_t *y_buf, unsigned long num_samples, demodfm_state_t *state)
 {
     ///  [b,a] = butter(1, 0.1) -> 3x tau (95%) ~10 samples
-    //static int const alp[2] = {FIX(1.00000), FIX(0.72654)};
-    //static int const blp[2] = {FIX(0.13673), FIX(0.13673)};
+    static int const alp[2] = {FIX(1.00000), FIX(0.72654)};
+    static int const blp[2] = {FIX(0.13673), FIX(0.13673)};
     ///  [b,a] = butter(1, 0.2) -> 3x tau (95%) ~5 samples
-    static int const alp[2] = {FIX(1.00000), FIX(0.50953)};
-    static int const blp[2] = {FIX(0.24524), FIX(0.24524)};
+    //static int const alp[2] = {FIX(1.00000), FIX(0.50953)};
+    //static int const blp[2] = {FIX(0.24524), FIX(0.24524)};
 
     int16_t ar, ai;  // New IQ sample: x[n]
     int16_t br, bi;  // Old IQ sample: x[n-1]
