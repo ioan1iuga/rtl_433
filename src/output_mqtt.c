@@ -22,6 +22,104 @@
 
 #include "mongoose.h"
 
+/* MQTT transmission list */
+
+typedef struct mqtt_msg {
+    char *topic;
+    char *msg;
+    double timeout;
+    int retries;
+    uint16_t mid;
+} mqtt_msg_t;
+
+/// Dynamically growing list, call list_ensure_size() to alloc elems.
+typedef struct inflight {
+    mqtt_msg_t *elems;
+    size_t size;
+    size_t len;
+} inflight_t;
+
+static void inflight_ensure_size(inflight_t *list, size_t min_size)
+{
+    if (!list->elems || list->size < min_size) {
+        list->elems = realloc(list->elems, min_size * sizeof(*list->elems));
+        if (!list->elems) {
+            FATAL_REALLOC("list_ensure_size()");
+        }
+        list->size = min_size;
+    }
+}
+
+static void inflight_add(inflight_t *list, char const *topic, uint16_t mid, char const *msg)
+{
+    if (list->len >= list->size)
+        inflight_ensure_size(list, list->size < 8 ? 8 : list->size + list->size / 2);
+
+    char *topic_dup = strdup(topic);
+    if (!topic_dup) {
+        WARN_STRDUP("inflight_add()");
+        return; // this just ignores the error
+    }
+    char *msg_dup = strdup(msg);
+    if (!msg_dup) {
+        WARN_STRDUP("inflight_add()");
+        free(topic_dup);
+        return; // this just ignores the error
+    }
+
+    list->elems[list->len++] = (mqtt_msg_t) {
+            .topic   = topic_dup,
+            .msg     = msg_dup,
+            .timeout = mg_time() + 1.2,
+            .retries = 0,
+            .mid     = mid,
+    };
+    fprintf(stderr, "MQTT publishing: %d (%zu inflight)\n", mid, list->len);
+}
+
+static void inflight_remove_at(inflight_t *list, size_t idx)
+{
+    if (idx >= list->len) {
+        return; // report error?
+    }
+    free(list->elems[idx].topic);
+    free(list->elems[idx].msg);
+    list->len--;
+    if (list->len > 0) {
+        list->elems[idx] = list->elems[list->len];
+    }
+}
+
+static int inflight_remove(inflight_t *list, uint16_t mid)
+{
+    for (size_t i = 0; i < list->len; ++i) {
+        if (list->elems[i].mid == mid) {
+            inflight_remove_at(list, i);
+            fprintf(stderr, "MQTT acknowledge: %d (%zu inflight)\n", mid, list->len);
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+static void inflight_clear(inflight_t *list)
+{
+    for (size_t i = 0; i < list->len; ++i) {
+        free(list->elems[i].topic);
+        free(list->elems[i].msg);
+    }
+    list->len = 0;
+}
+
+static void inflight_free(inflight_t *list)
+{
+    inflight_clear(list);
+    free(list->elems);
+    list->elems = NULL;
+    list->size  = 0;
+}
+
 /* MQTT client abstraction */
 
 typedef struct mqtt_client {
@@ -33,6 +131,9 @@ typedef struct mqtt_client {
     char client_id[256];
     uint16_t message_id;
     int publish_flags; // MG_MQTT_RETAIN | MG_MQTT_QOS(0)
+    unsigned qos;
+    struct mg_connection *timer;
+    inflight_t inflight;
 } mqtt_client_t;
 
 static void mqtt_client_event(struct mg_connection *nc, int ev, void *ev_data)
@@ -72,8 +173,28 @@ static void mqtt_client_event(struct mg_connection *nc, int ev, void *ev_data)
             fprintf(stderr, "MQTT Connection established.\n");
         }
         break;
+
+    // > Publish message (id)
+    // < Publish received (id)
+    case MG_EV_MQTT_PUBREC:
+        // TODO: send PUBREL for msg
+        fprintf(stderr, "MQTT Message publishing received (msg_id: %u)\n", msg->message_id);
+        break;
+    // > Publish release (id)
+    // < Publish complete (id)
+    case MG_EV_MQTT_PUBCOMP:
+        fprintf(stderr, "MQTT Message publishing complete (msg_id: %u)\n", msg->message_id);
+        break;
+    case MG_EV_MQTT_PUBREL:
+        fprintf(stderr, "MQTT Incoming release (msg_id: %u)\n", msg->message_id);
+        break;
+
     case MG_EV_MQTT_PUBACK:
-        fprintf(stderr, "MQTT Message publishing acknowledged (msg_id: %u)\n", msg->message_id);
+        if (inflight_remove(&ctx->inflight, msg->message_id) >= 0) {
+            // fprintf(stderr, "MQTT Message publishing acknowledged (msg_id: %u)\n", msg->message_id);
+        } else {
+            fprintf(stderr, "MQTT Publishing acknowledge for unknown message (msg_id: %u)\n", msg->message_id);
+        }
         break;
     case MG_EV_MQTT_SUBACK:
         fprintf(stderr, "MQTT Subscription acknowledged.\n");
@@ -101,12 +222,42 @@ static void mqtt_client_event(struct mg_connection *nc, int ev, void *ev_data)
     }
 }
 
+static void mqtt_client_timer(struct mg_connection *nc, int ev, void *ev_data)
+{
+    // fprintf(stderr, "%s: %d, %d, %p, %p\n", __func__, nc->sock, ev, nc->user_data, ev_data);
+    mqtt_client_t *ctx = (mqtt_client_t *)nc->user_data;
+    switch (ev) {
+    case MG_EV_TIMER: {
+        double now  = *(double *)ev_data;
+        double next = mg_time() + 0.5;
+        // fprintf(stderr, "timer event, current time: %.2lf, next timer: %.2lf\n", now, next);
+        mg_set_timer(nc, next); // Send us timer event again after 1.5 seconds
+
+        if (!ctx->conn || !ctx->conn->proto_handler)
+            break;
+
+        // check inflight...
+        for (size_t i = 0; i < ctx->inflight.len; ++i) {
+            mqtt_msg_t *elem = &ctx->inflight.elems[i];
+            if (elem->timeout < now) {
+                fprintf(stderr, "MQTT resending (%d): %d\n", elem->retries + 1, elem->mid);
+                mg_mqtt_publish(ctx->conn, elem->topic, elem->mid, ctx->publish_flags, elem->msg, strlen(elem->msg));
+                elem->timeout = now + 1.2;
+                elem->retries += 1;
+            }
+        }
+        break;
+    }
+    }
+}
+
 static mqtt_client_t *mqtt_client_init(struct mg_mgr *mgr, tls_opts_t *tls_opts, char const *host, char const *port, char const *user, char const *pass, char const *client_id, int retain, int qos)
 {
     mqtt_client_t *ctx = calloc(1, sizeof(*ctx));
     if (!ctx)
         FATAL_CALLOC("mqtt_client_init()");
 
+    ctx->qos                 = qos;
     ctx->mqtt_opts.user_name = user;
     ctx->mqtt_opts.password  = pass;
     ctx->publish_flags  = MG_MQTT_QOS(qos) | (retain ? MG_MQTT_RETAIN : 0);
@@ -148,15 +299,28 @@ static mqtt_client_t *mqtt_client_init(struct mg_mgr *mgr, tls_opts_t *tls_opts,
         exit(1);
     }
 
+    if (qos > 0) {
+        // add dummy socket to receive broadcasts
+        struct mg_add_sock_opts opts = {.user_data = ctx};
+        ctx->timer = mg_add_sock_opt(mgr, INVALID_SOCKET, mqtt_client_timer, opts);
+        // Send us MG_EV_TIMER event after 500 milliseconds
+        mg_set_timer(ctx->timer, mg_time() + 0.5);
+        // TODO: need a way to end on mqtt_client_free()
+    }
+
     return ctx;
 }
 
 static void mqtt_client_publish(mqtt_client_t *ctx, char const *topic, char const *str)
 {
+    ctx->message_id++;
+    if (ctx->qos > 0) {
+        inflight_add(&ctx->inflight, topic, ctx->message_id, str);
+    }
+
     if (!ctx->conn || !ctx->conn->proto_handler)
         return;
 
-    ctx->message_id++;
     mg_mqtt_publish(ctx->conn, topic, ctx->message_id, ctx->publish_flags, str, strlen(str));
 }
 
@@ -166,6 +330,11 @@ static void mqtt_client_free(mqtt_client_t *ctx)
         ctx->conn->user_data = NULL;
         ctx->conn->flags |= MG_F_CLOSE_IMMEDIATELY;
     }
+    if (ctx) {
+        mg_set_timer(ctx->timer, 0); // Clear retry timer
+        inflight_free(&ctx->inflight);
+    }
+
     free(ctx);
 }
 
