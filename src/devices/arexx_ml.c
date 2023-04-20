@@ -15,11 +15,12 @@
 /**
 Arexx Multilogger.
 
-- Arexx IP-HA90 #2388
+- Arexx IP-HA90 (MCP9808 sensor) s.a. #2388
 - Arexx IP-TH78EXT
-- Arexx TSN-70E #2482
+- Arexx TSN-70E (Sensirion SHT-10 sensor) s.a. #2482
 
 The IP-HA90 has a Microchip RFPIC12f675f at 433.92M and a Microchip MCP9808 temperature sensor.
+The TSN-70E has a Sensirion SHT-10 temperature and humidity and temperature sensor.
 
 FSK modulated with Manchester encoding, half-bit width is 208 us (2400bps MC).
 The sensors transmit approx. every 45 seconds alternating Temperature/Humidity.
@@ -56,7 +57,7 @@ Message layout:
 
 - L : 8 bit: message length 7 or 5 (including length byte, excluding checksum)
 - I : 16 bit: ID, little-endian, even number = Temperature
-- S : 16 bit: raw sensor value (Sensirion SHT-10)
+- S : 16 bit: raw sensor value
 - U : 16 bit: optional extra data, unknown
 - X : 8 bit: CRC, poly 0x31, init 0xc0
 - Y : 8 bit: inverted CRC check, only IP-HA90
@@ -104,12 +105,26 @@ static int arexx_ml_decode(r_device *decoder, bitbuffer_t *bitbuffer)
     int sens_val = (b[3] << 8) | (b[4]); // big-endian?
     int is_humi  = id & 1; // even number: Temperature, odd number: Humidity
 
+    // MCP9808 Ambient Temperature Register "5-4":
+    int temp_alert = (sens_val >> 13) & 7;
+    int temp_raw   = (int16_t)(sens_val << 3); // uses sign-extend
+    float temp_c   = temp_raw / 128;
+
+    if (msg_len == 5) { // not sure if this is the proper check
+        // SHT10 Temperature
+        temp_c = sens_val * 0.01f - 40.0f; // offset actually varies by Vdd
+    }
+    // SHT10 Humidity
+    float humidity = -2.0468 + 0.0367 * sens_val - 1.5955E-6 * sens_val * sens_val;
+
     /* clang-format off */
     data_t *data = data_make(
             "model",            "",                 DATA_STRING, "Arexx-ML",
             "id",               "ID",               DATA_FORMAT, "%04x",    DATA_INT, id,
-            "temperature_raw",  "Temperature",      DATA_COND, !is_humi,    DATA_FORMAT, "%04x", DATA_INT, sens_val,
-            "humidity_raw",     "Humidity",         DATA_COND, is_humi,     DATA_FORMAT, "%04x", DATA_INT, sens_val,
+            "temperature_C",    "Temperature",      DATA_COND, !is_humi,    DATA_FORMAT, "%.2f C", DATA_DOUBLE, temp_c,
+            "temperature_alert",  "Alert",          DATA_COND, !is_humi,    DATA_FORMAT, "%x", DATA_INT, temp_alert,
+            "humidity",         "Humidity",         DATA_COND, is_humi,     DATA_FORMAT, "%.1f %%", DATA_DOUBLE, humidity,
+            "sensor_raw",       "Sensor Raw",       DATA_FORMAT, "%04x",    DATA_INT, sens_val,
             "mic",              "Integrity",        DATA_STRING, "CRC",
             NULL);
     /* clang-format on */
@@ -121,8 +136,10 @@ static int arexx_ml_decode(r_device *decoder, bitbuffer_t *bitbuffer)
 static char const *const arexx_ml_output_fields[] = {
         "model",
         "id",
-        "temperature_raw",
-        "humidity_raw",
+        "temperature_C",
+        "temperature_alert",
+        "humidity",
+        "sensor_raw",
         "mic",
         NULL,
 };
